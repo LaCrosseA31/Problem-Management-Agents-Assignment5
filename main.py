@@ -1,112 +1,90 @@
 """
-FinServe BCM/ITSM Simulation — Main Entry Point
-Instructor: Set EVENT_SCENARIO before each live session.
+FinServe Problem Management — Main Entry Point
+Loads CSV data paths, runs the Problem Management crew, and saves the final report.
 """
 
 import os
 from dotenv import load_dotenv
-from src.bcm_crew import create_bcm_crew
-from simulation_engine import SimulationEngine
+from src.problem_crew import create_problem_crew
 
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# INSTRUCTOR: Set this to one of the scenario keys below before each session
+# Data paths (tools resolve these automatically from BASE_DIR)
 # ---------------------------------------------------------------------------
-EVENT_SCENARIO = "ransomware"  # Options: ransomware | cloud_outage_ddos | data_breach | insider_threat | supply_chain | cascading_failure
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
-EVENTS = {
-    "ransomware": (
-        "A ransomware attack (LockBit 3.0 variant) has encrypted the primary data centre. "
-        "The Transaction Database and Core Banking API are completely offline. "
-        "Mobile Banking and Online Transfers are down for all 2.1M customers. "
-        "Backups are potentially compromised — ransom note found on file servers. "
-        "No confirmed data exfiltration yet, but lateral movement indicators are present in SIEM."
-    ),
+# Ensure output directory exists
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    "cloud_outage_ddos": (
-        "AWS us-east-1 is experiencing a multi-AZ availability event simultaneously with a "
-        "volumetric DDoS attack (peak 2.4 Tbps, UDP flood + HTTPS layer 7 attack). "
-        "All FinServe services hosted in us-east-1 are degraded or unreachable. "
-        "Cloudflare WAF is partially mitigating but the attack is evolving. "
-        "DR region eu-west-1 is unaffected. Customer-facing latency >30 seconds."
-    ),
+# Set environment variables for tools
+os.environ["FINSERVE_DATA_DIR"] = DATA_DIR
+os.environ["FINSERVE_OUTPUT_DIR"] = OUTPUT_DIR
 
-    "data_breach": (
-        "A database containing 2.3 million customer records (full PII including names, addresses, "
-        "dates of birth, and payment card data) was accessed by an unauthorised party. "
-        "The breach vector appears to be a compromised service account (svc-reporting-prod) "
-        "exploiting CVE-2023-34362 (MOVEit Transfer SQL injection). "
-        "Exfiltration is confirmed via anomalous egress traffic patterns detected in Cloudflare logs — "
-        "approximately 4.7GB transferred to an external IP in Eastern Europe over 6 hours. "
-        "The GDPR 72-hour notification clock has started. PCI-DSS card brand notification required."
-    ),
+# ---------------------------------------------------------------------------
+# Verify data files exist
+# ---------------------------------------------------------------------------
+required_files = [
+    os.path.join(DATA_DIR, "finserve_incidents_q1_2026.csv"),
+    os.path.join(DATA_DIR, "finserve_cmdb.csv"),
+    os.path.join(DATA_DIR, "finserve_changes.csv"),
+]
 
-    "insider_threat": (
-        "A privileged database administrator (username: jreyes-dba) has been detected "
-        "systematically exporting large volumes of customer financial data to personal Dropbox storage. "
-        "DLP alerts flagged the activity. Audit logs confirm the exports span the past 3 weeks — "
-        "estimated 1.8 million customer records affected including account balances and transaction history. "
-        "The DBA has unrestricted access to all production databases. "
-        "HR and Legal must be engaged before any account action. "
-        "GDPR breach notification required — data subjects are high-net-worth private banking customers."
-    ),
-
-    "supply_chain": (
-        "FinServe's critical third-party payment processor, PayBridge Ltd, has disclosed a "
-        "compromise of their API gateway infrastructure. The attack vector was a malicious update "
-        "to their authentication library (supply chain compromise). "
-        "All transactions processed through PayBridge's system in the last 48 hours may be affected — "
-        "approximately 890,000 transactions totalling £340M in value. "
-        "Card data for those transactions may have been captured by the attacker. "
-        "FinServe must immediately assess: suspend PayBridge integration, notify card schemes, "
-        "activate backup processor FinancePay, and determine customer notification scope."
-    ),
-
-    "cascading_failure": (
-        "A failed database migration during a scheduled maintenance window has corrupted the "
-        "Transaction Database transaction ledger. The automated rollback procedure failed due to "
-        "a schema mismatch introduced in the migration script. "
-        "The corruption is now propagating downstream — the Reconciliation Service is processing "
-        "corrupt data and generating incorrect financial statements. "
-        "Online Transfers are suspended as a precautionary measure. "
-        "The Core Banking API is serving stale cached data. "
-        "Estimated affected transactions: 47,000 over a 3-hour window. "
-        "SOX financial reporting controls are at risk. DBA Lead is on-call but has limited "
-        "experience with this specific database version."
-    ),
-}
+for filepath in required_files:
+    if not os.path.exists(filepath):
+        print(f"ERROR: Required data file not found: {filepath}")
+        print("Please ensure all CSV files are in the data/ directory.")
+        exit(1)
 
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
 
-event_description = EVENTS[EVENT_SCENARIO]
-
 print("=" * 80)
-print(f"  FINSERVE BCM/ITSM SIMULATION — SCENARIO: {EVENT_SCENARIO.upper()}")
+print("  FINSERVE PROBLEM MANAGEMENT — AGENT-DRIVEN ANALYSIS")
+print("  From Incident Noise to Root Cause Intelligence")
 print("=" * 80)
-print(f"\nEvent Description:\n{event_description}\n")
-print("=" * 80)
-print("  Activating BCM Crew...")
+print(f"\nData directory: {DATA_DIR}")
+print(f"Output directory: {OUTPUT_DIR}")
+print(f"\nData files:")
+for f in required_files:
+    print(f"  - {os.path.basename(f)}")
+print("\n" + "=" * 80)
+print("  Activating Problem Management Crew...")
+print("  Pipeline: Detection → Classification → Root Cause → Known Error → RFC")
 print("=" * 80 + "\n")
 
-crew = create_bcm_crew()
-result = crew.kickoff(inputs={"event_description": event_description})
+crew = create_problem_crew()
+result = crew.kickoff()
 
 print("\n" + "=" * 80)
-print("  FINAL INCIDENT RESPONSE OUTPUT FROM CREW AGENTS:")
+print("  FINAL PROBLEM MANAGEMENT REPORT:")
 print("=" * 80)
 print(result)
 print("=" * 80)
 
-# Auto-grade using simulation engine
-engine = SimulationEngine()
-score = engine.evaluate(result, EVENT_SCENARIO)
+# Save final report to output directory
+report_path = os.path.join(OUTPUT_DIR, "problem_management_report.md")
+with open(report_path, "w", encoding="utf-8") as f:
+    f.write("# FinServe Problem Management Report — Q1 2026\n\n")
+    f.write("## Agent-Driven Analysis Results\n\n")
+    f.write(str(result))
 
-print(f"\n{'=' * 80}")
-print(f"  SIMULATION ENGINE SCORE — SCENARIO: {EVENT_SCENARIO.upper()}")
-print(f"{'=' * 80}")
-print(f"  Overall KPI Score: {score['overall_kpi_score']}%")
-print(f"  Grade: {score.get('grade', 'N/A')}")
-print(f"{'=' * 80}\n")
+print(f"\nFull report saved to: {report_path}")
+print(f"\nOutput files generated in: {OUTPUT_DIR}")
+
+# List generated output files
+if os.path.exists(OUTPUT_DIR):
+    output_files = os.listdir(OUTPUT_DIR)
+    if output_files:
+        print("\nGenerated output files:")
+        for fname in sorted(output_files):
+            print(f"  - {fname}")
+    else:
+        print("\nNo output files generated.")
+
+print("\n" + "=" * 80)
+print("  Problem Management analysis complete.")
+print("=" * 80)
