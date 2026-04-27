@@ -32,8 +32,15 @@ def _load_csv(filepath: str) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-# ========================== Pydantic Input Models ==========================
+def _parse_dt(s: str) -> Optional[datetime]:
+    """Parse a datetime string, returning None on failure."""
+    try:
+        return datetime.strptime(s.strip(), "%Y-%m-%d %H:%M")
+    except (ValueError, AttributeError):
+        return None
 
+
+# ========================== Pydantic Input Models ==========================
 
 class ParseIncidentsInput(BaseModel):
     service: Optional[str] = Field(None, description="Filter by service name (e.g. 'payment-gateway')")
@@ -42,37 +49,30 @@ class ParseIncidentsInput(BaseModel):
     date_from: Optional[str] = Field(None, description="Filter incidents from this date (YYYY-MM-DD)")
     date_to: Optional[str] = Field(None, description="Filter incidents up to this date (YYYY-MM-DD)")
 
-
 class FindPatternsInput(BaseModel):
     min_frequency: int = Field(3, description="Minimum number of incidents to consider a cluster a pattern")
-
 
 class TimeDistributionInput(BaseModel):
     service: Optional[str] = Field(None, description="Filter by service name")
     error_code: Optional[str] = Field(None, description="Filter by error code")
     subcategory: Optional[str] = Field(None, description="Filter by subcategory")
 
-
 class QueryCmdbInput(BaseModel):
     ci_id: Optional[str] = Field(None, description="Configuration Item ID (e.g. 'CI-1042')")
     ci_name: Optional[str] = Field(None, description="CI name / service name (e.g. 'payment-gateway')")
-
 
 class QueryChangesInput(BaseModel):
     ci_id: Optional[str] = Field(None, description="Filter changes by CI ID")
     date_from: Optional[str] = Field(None, description="Start date (YYYY-MM-DD)")
     date_to: Optional[str] = Field(None, description="End date (YYYY-MM-DD)")
 
-
 class MapDependenciesInput(BaseModel):
     ci_id: str = Field(..., description="CI ID to map dependencies for (e.g. 'CI-1042')")
-
 
 class CorrelateIncidentsChangesInput(BaseModel):
     service: Optional[str] = Field(None, description="Service name to correlate")
     ci_id: Optional[str] = Field(None, description="CI ID to correlate")
     window_hours: int = Field(72, description="Hours before incident to search for related changes")
-
 
 class FiveWhysInput(BaseModel):
     pattern_description: str = Field(..., description="Description of the pattern to analyze")
@@ -80,11 +80,9 @@ class FiveWhysInput(BaseModel):
     error_code: Optional[str] = Field(None, description="Error code associated with pattern")
     ci_id: Optional[str] = Field(None, description="CI ID for CMDB cross-reference")
 
-
 class BuildTimelineInput(BaseModel):
     service: Optional[str] = Field(None, description="Service name to build timeline for")
     ci_id: Optional[str] = Field(None, description="CI ID to build timeline for")
-
 
 class CreateProblemRecordInput(BaseModel):
     pattern_id: str = Field(..., description="Unique pattern identifier (e.g. 'PAT-001')")
@@ -93,7 +91,6 @@ class CreateProblemRecordInput(BaseModel):
     affected_cis: str = Field(..., description="Comma-separated CI IDs")
     linked_incidents: str = Field(..., description="Comma-separated incident IDs")
     description: str = Field(..., description="Problem description with evidence")
-
 
 class CreateKnownErrorInput(BaseModel):
     problem_id: str = Field(..., description="Related problem record ID")
@@ -104,7 +101,6 @@ class CreateKnownErrorInput(BaseModel):
     affected_ci: str = Field(..., description="Primary affected CI ID")
     linked_incidents: str = Field(..., description="Comma-separated incident IDs")
 
-
 class CreateRfcInput(BaseModel):
     known_error_id: str = Field(..., description="Related Known Error ID")
     title: str = Field(..., description="RFC title")
@@ -114,15 +110,17 @@ class CreateRfcInput(BaseModel):
     rollback_plan: str = Field(..., description="Rollback procedure")
     implementation_schedule: str = Field(..., description="Proposed implementation timeline")
 
-
 class CalculateImpactInput(BaseModel):
     service: str = Field(..., description="Service name to calculate impact for")
     incident_ids: Optional[str] = Field(None, description="Comma-separated incident IDs to scope impact")
 
-
 class CrossReferenceInput(BaseModel):
     service: str = Field(..., description="Service name to cross-reference")
     error_code: Optional[str] = Field(None, description="Error code to cross-reference")
+
+class AnalyzeAllPatternsInput(BaseModel):
+    """No required inputs — runs comprehensive analysis on all data."""
+    pass
 
 
 # ========================== Tool 1: parse_incidents ==========================
@@ -170,76 +168,79 @@ class FindPatternsTool(BaseTool):
     name: str = "find_patterns"
     description: str = (
         "Groups incidents by service + subcategory + error_code and returns clusters "
-        "above a frequency threshold. Identifies candidate problem patterns by analyzing "
-        "recurring combinations in the incident data."
+        "above a frequency threshold. Also groups by service+error_code for broader "
+        "patterns. Returns candidate problem patterns with temporal analysis."
     )
     args_schema: type[BaseModel] = FindPatternsInput
 
     def _run(self, min_frequency: int = 3) -> str:
         incidents = _load_csv(INCIDENTS_CSV)
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-        # Group by (service, subcategory, error_code)
-        clusters = defaultdict(list)
+        # Group by (service, error_code) — the strongest signal
+        error_clusters = defaultdict(list)
         for inc in incidents:
-            key = (inc.get("service", ""), inc.get("subcategory", ""), inc.get("error_code", ""))
-            clusters[key].append(inc)
-
-        # Also group by (service, error_code) for broader patterns
-        broad_clusters = defaultdict(list)
-        for inc in incidents:
-            key = (inc.get("service", ""), inc.get("error_code", ""))
-            broad_clusters[key].append(inc)
-
-        # Also group by (service, subcategory) for category-level patterns
-        cat_clusters = defaultdict(list)
-        for inc in incidents:
-            key = (inc.get("service", ""), inc.get("subcategory", ""))
-            cat_clusters[key].append(inc)
+            err = inc.get("error_code", "").strip()
+            svc = inc.get("service", "").strip()
+            if err and svc:
+                error_clusters[(svc, err)].append(inc)
 
         patterns = []
+        seen_incident_ids = set()
 
-        # Exact match clusters
-        for (svc, subcat, err), incs in clusters.items():
-            if len(incs) >= min_frequency:
-                priorities = Counter(i.get("priority", "") for i in incs)
-                patterns.append({
-                    "cluster_type": "exact_match",
-                    "service": svc,
-                    "subcategory": subcat,
-                    "error_code": err,
-                    "incident_count": len(incs),
-                    "incident_ids": [i["incident_id"] for i in incs],
-                    "priority_distribution": dict(priorities),
-                    "date_range": f"{incs[0].get('opened_at', '')[:10]} to {incs[-1].get('opened_at', '')[:10]}",
-                    "sample_descriptions": list(set(i.get("short_description", "") for i in incs))[:3],
-                    "related_changes": list(set(i.get("related_change", "") for i in incs if i.get("related_change", "").strip())),
-                })
+        for (svc, err), incs in sorted(error_clusters.items(), key=lambda x: len(x[1]), reverse=True):
+            if len(incs) < min_frequency:
+                continue
 
-        # Broad clusters (service + error_code)
-        for (svc, err), incs in broad_clusters.items():
-            if len(incs) >= min_frequency and err.strip():
-                # Skip if already covered by exact match
-                already_covered = any(
-                    p["service"] == svc and p["error_code"] == err
-                    for p in patterns
-                )
-                if not already_covered:
-                    priorities = Counter(i.get("priority", "") for i in incs)
-                    patterns.append({
-                        "cluster_type": "service_error",
-                        "service": svc,
-                        "subcategory": "various",
-                        "error_code": err,
-                        "incident_count": len(incs),
-                        "incident_ids": [i["incident_id"] for i in incs],
-                        "priority_distribution": dict(priorities),
-                        "date_range": f"{incs[0].get('opened_at', '')[:10]} to {incs[-1].get('opened_at', '')[:10]}",
-                        "sample_descriptions": list(set(i.get("short_description", "") for i in incs))[:3],
-                        "related_changes": list(set(i.get("related_change", "") for i in incs if i.get("related_change", "").strip())),
-                    })
+            ids = [i["incident_id"] for i in incs]
+            priorities = Counter(i.get("priority", "") for i in incs)
+            descriptions = list(set(i.get("short_description", "") for i in incs))
+            resolutions = list(set(i.get("resolution_notes", "") for i in incs if i.get("resolution_notes", "").strip()))
+            linked_changes = list(set(i.get("related_change", "") for i in incs if i.get("related_change", "").strip()))
 
-        # Sort by frequency descending
-        patterns.sort(key=lambda p: p["incident_count"], reverse=True)
+            # Temporal analysis
+            day_counts = Counter()
+            hour_counts = Counter()
+            dom_counts = Counter()
+            for inc in incs:
+                dt = _parse_dt(inc.get("opened_at", ""))
+                if dt:
+                    day_counts[day_names[dt.weekday()]] += 1
+                    hour_counts[dt.hour] += 1
+                    dom_counts[dt.day] += 1
+
+            temporal_signals = []
+            if day_counts:
+                top_day, top_count = day_counts.most_common(1)[0]
+                if top_count >= max(2, len(incs) * 0.3):
+                    temporal_signals.append(f"CLUSTERS ON {top_day.upper()} ({top_count}/{len(incs)} incidents)")
+            if hour_counts:
+                peak_hours = [h for h, c in hour_counts.items() if c >= max(2, len(incs) * 0.25)]
+                if peak_hours:
+                    temporal_signals.append(f"Peak hours: {', '.join(f'{h:02d}:00' for h in sorted(peak_hours))}")
+            month_start = sum(dom_counts.get(d, 0) for d in [1, 2, 3])
+            if month_start >= max(2, len(incs) * 0.3):
+                temporal_signals.append(f"CLUSTERS AT MONTH START (days 1-3): {month_start}/{len(incs)} incidents")
+
+            # Track which incidents are in this pattern
+            for iid in ids:
+                seen_incident_ids.add(iid)
+
+            patterns.append({
+                "service": svc,
+                "error_code": err,
+                "incident_count": len(incs),
+                "incident_ids": ids,
+                "priority_distribution": dict(priorities),
+                "p1_count": priorities.get("P1-Critical", 0),
+                "date_range": f"{incs[0].get('opened_at', '')[:10]} to {incs[-1].get('opened_at', '')[:10]}",
+                "descriptions": descriptions[:3],
+                "resolution_notes": resolutions[:3],
+                "related_changes": linked_changes,
+                "temporal_signals": temporal_signals,
+                "day_of_week": dict(day_counts),
+                "subcategories": list(set(i.get("subcategory", "") for i in incs)),
+            })
 
         return json.dumps({
             "total_incidents_analyzed": len(incidents),
@@ -275,53 +276,38 @@ class GetTimeDistributionTool(BaseTool):
         day_dist = Counter()
         hour_dist = Counter()
         day_of_month_dist = Counter()
-        dates = []
 
         for inc in incidents:
-            opened = inc.get("opened_at", "")
-            if opened:
-                try:
-                    dt = datetime.strptime(opened, "%Y-%m-%d %H:%M")
-                    day_dist[day_names[dt.weekday()]] += 1
-                    hour_dist[dt.hour] += 1
-                    day_of_month_dist[dt.day] += 1
-                    dates.append(dt)
-                except ValueError:
-                    pass
+            dt = _parse_dt(inc.get("opened_at", ""))
+            if dt:
+                day_dist[day_names[dt.weekday()]] += 1
+                hour_dist[dt.hour] += 1
+                day_of_month_dist[dt.day] += 1
 
-        # Calculate avg resolution time
         resolution_times = []
         for inc in incidents:
-            opened = inc.get("opened_at", "")
-            resolved = inc.get("resolved_at", "")
-            if opened and resolved:
-                try:
-                    dt_open = datetime.strptime(opened, "%Y-%m-%d %H:%M")
-                    dt_resolved = datetime.strptime(resolved, "%Y-%m-%d %H:%M")
-                    resolution_times.append((dt_resolved - dt_open).total_seconds() / 3600)
-                except ValueError:
-                    pass
+            dt_o = _parse_dt(inc.get("opened_at", ""))
+            dt_r = _parse_dt(inc.get("resolved_at", ""))
+            if dt_o and dt_r:
+                resolution_times.append((dt_r - dt_o).total_seconds() / 3600)
 
-        # Sort distributions
         sorted_days = {d: day_dist.get(d, 0) for d in day_names}
         sorted_hours = {f"{h:02d}:00": hour_dist.get(h, 0) for h in range(24)}
 
-        # Identify temporal anomalies
         temporal_notes = []
         if day_dist:
             max_day = max(day_dist, key=day_dist.get)
-            if day_dist[max_day] >= len(incidents) * 0.3:
+            if day_dist[max_day] >= max(2, len(incidents) * 0.3):
                 temporal_notes.append(f"Strong clustering on {max_day} ({day_dist[max_day]}/{len(incidents)} incidents)")
         if hour_dist:
-            peak_hours = [h for h, c in hour_dist.items() if c >= len(incidents) * 0.2]
+            peak_hours = [h for h, c in hour_dist.items() if c >= max(2, len(incidents) * 0.2)]
             if peak_hours:
                 temporal_notes.append(f"Peak hours: {', '.join(f'{h:02d}:00' for h in sorted(peak_hours))}")
-        if day_of_month_dist:
-            month_start = sum(day_of_month_dist.get(d, 0) for d in [1, 2, 3])
-            if month_start >= len(incidents) * 0.3:
-                temporal_notes.append(f"Clustering at month start (days 1-3): {month_start}/{len(incidents)} incidents")
+        month_start = sum(day_of_month_dist.get(d, 0) for d in [1, 2, 3])
+        if month_start >= max(2, len(incidents) * 0.3):
+            temporal_notes.append(f"Clustering at month start (days 1-3): {month_start}/{len(incidents)} incidents")
 
-        result = {
+        return json.dumps({
             "filters": {"service": service, "error_code": error_code, "subcategory": subcategory},
             "incident_count": len(incidents),
             "day_of_week_distribution": sorted_days,
@@ -330,8 +316,7 @@ class GetTimeDistributionTool(BaseTool):
             "temporal_notes": temporal_notes,
             "avg_resolution_hours": round(sum(resolution_times) / len(resolution_times), 2) if resolution_times else None,
             "incident_ids": [i["incident_id"] for i in incidents],
-        }
-        return json.dumps(result, indent=2)
+        }, indent=2)
 
 
 # ========================== Tool 4: query_cmdb ==========================
@@ -433,15 +418,29 @@ class MapDependenciesTool(BaseTool):
                     "tier": dci.get("tier", ""), "ci_type": dci.get("ci_type", "")
                 })
 
-        # Find shared infrastructure
+        # Find shared infrastructure — look for shared database or infra strings
         shared_infra = []
         target_infra = target.get("infra", "")
+        target_notes = target.get("notes", "")
         for ci in cmdb:
-            if ci["ci_id"] != ci_id and target_infra and target_infra in ci.get("infra", ""):
+            if ci["ci_id"] == ci_id:
+                continue
+            # Check infra overlap
+            if target_infra and any(part.strip() in ci.get("infra", "") for part in target_infra.split("+") if len(part.strip()) > 5):
                 shared_infra.append({
                     "ci_id": ci["ci_id"], "ci_name": ci.get("ci_name", ""),
-                    "shared_resource": target_infra
+                    "shared_resource": target_infra,
+                    "other_infra": ci.get("infra", ""),
+                    "other_notes": ci.get("notes", ""),
                 })
+            # Check notes for shared references (e.g., shared connection pool)
+            if "db-ledger-prod" in target_notes and "db-ledger-prod" in ci.get("notes", ""):
+                if not any(s["ci_id"] == ci["ci_id"] for s in shared_infra):
+                    shared_infra.append({
+                        "ci_id": ci["ci_id"], "ci_name": ci.get("ci_name", ""),
+                        "shared_resource": "db-ledger-prod (shared database connection pool)",
+                        "other_notes": ci.get("notes", ""),
+                    })
 
         return json.dumps({
             "ci_id": ci_id,
@@ -477,26 +476,16 @@ class CorrelateIncidentsChangesTool(BaseTool):
 
         correlations = []
         for inc in incidents:
-            inc_time_str = inc.get("opened_at", "")
-            if not inc_time_str:
-                continue
-            try:
-                inc_time = datetime.strptime(inc_time_str, "%Y-%m-%d %H:%M")
-            except ValueError:
+            inc_time = _parse_dt(inc.get("opened_at", ""))
+            if not inc_time:
                 continue
 
-            # Check explicitly linked change
             linked_change = inc.get("related_change", "").strip()
 
-            # Find changes within the window
             nearby_changes = []
             for chg in changes:
-                chg_time_str = chg.get("implemented_at", "")
-                if not chg_time_str:
-                    continue
-                try:
-                    chg_time = datetime.strptime(chg_time_str, "%Y-%m-%d %H:%M")
-                except ValueError:
+                chg_time = _parse_dt(chg.get("implemented_at", ""))
+                if not chg_time:
                     continue
 
                 delta = (inc_time - chg_time).total_seconds() / 3600
@@ -513,7 +502,7 @@ class CorrelateIncidentsChangesTool(BaseTool):
             if nearby_changes or linked_change:
                 correlations.append({
                     "incident_id": inc.get("incident_id", ""),
-                    "incident_time": inc_time_str,
+                    "incident_time": inc.get("opened_at", ""),
                     "service": inc.get("service", ""),
                     "error_code": inc.get("error_code", ""),
                     "linked_change": linked_change,
@@ -529,6 +518,7 @@ class CorrelateIncidentsChangesTool(BaseTool):
 
 
 # ========================== Tool 8: five_whys_analysis ==========================
+# READS FROM ALL THREE CSV FILES
 
 class FiveWhysTool(BaseTool):
     name: str = "five_whys_analysis"
@@ -541,7 +531,6 @@ class FiveWhysTool(BaseTool):
 
     def _run(self, pattern_description: str, service: str,
              error_code: str = None, ci_id: str = None) -> str:
-        # Load CMDB for context
         cmdb = _load_csv(CMDB_CSV)
         changes = _load_csv(CHANGES_CSV)
         incidents = _load_csv(INCIDENTS_CSV)
@@ -603,10 +592,17 @@ class BuildTimelineTool(BaseTool):
     def _run(self, service: str = None, ci_id: str = None) -> str:
         incidents = _load_csv(INCIDENTS_CSV)
         changes = _load_csv(CHANGES_CSV)
+        cmdb = _load_csv(CMDB_CSV)
+
+        # Resolve ci_id from service name if needed
+        if service and not ci_id:
+            for ci in cmdb:
+                if service.lower() in ci.get("ci_name", "").lower():
+                    ci_id = ci.get("ci_id", "")
+                    break
 
         events = []
 
-        # Add incidents
         for inc in incidents:
             if service and service.lower() not in inc.get("service", "").lower():
                 continue
@@ -622,17 +618,9 @@ class BuildTimelineTool(BaseTool):
                 "resolution": inc.get("resolution_notes", ""),
             })
 
-        # Add changes
         for chg in changes:
-            if ci_id and ci_id.upper() not in chg.get("ci_id", "").upper():
+            if ci_id and ci_id.upper() != chg.get("ci_id", "").upper():
                 continue
-            if service and not ci_id:
-                # Match via CMDB
-                cmdb = _load_csv(CMDB_CSV)
-                for ci in cmdb:
-                    if service.lower() in ci.get("ci_name", "").lower():
-                        if chg.get("ci_id", "") != ci.get("ci_id", ""):
-                            continue
             events.append({
                 "timestamp": chg.get("implemented_at", ""),
                 "type": "CHANGE",
@@ -642,7 +630,6 @@ class BuildTimelineTool(BaseTool):
                 "details": chg.get("description", ""),
             })
 
-        # Sort chronologically
         events.sort(key=lambda e: e.get("timestamp", ""))
 
         return json.dumps({
@@ -713,7 +700,6 @@ class CreateKnownErrorTool(BaseTool):
             "framework_reference": "ITIL 4 Error Control — Known Error Documentation",
         }
 
-        # Write to file
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         filepath = os.path.join(OUTPUT_DIR, f"{ke_id}.json")
         with open(filepath, "w", encoding="utf-8") as f:
@@ -769,7 +755,6 @@ class CreateRfcTool(BaseTool):
             "approval_required_from": ["Change Advisory Board (CAB)", "Service Owner", "Technical Lead"],
         }
 
-        # Write to file
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         filepath = os.path.join(OUTPUT_DIR, f"{rfc_id}.json")
         with open(filepath, "w", encoding="utf-8") as f:
@@ -808,15 +793,10 @@ class CalculateImpactTool(BaseTool):
         priority_counts = Counter()
         for inc in filtered:
             priority_counts[inc.get("priority", "")] += 1
-            opened = inc.get("opened_at", "")
-            resolved = inc.get("resolved_at", "")
-            if opened and resolved:
-                try:
-                    dt_open = datetime.strptime(opened, "%Y-%m-%d %H:%M")
-                    dt_resolved = datetime.strptime(resolved, "%Y-%m-%d %H:%M")
-                    total_downtime_hours += (dt_resolved - dt_open).total_seconds() / 3600
-                except ValueError:
-                    pass
+            dt_o = _parse_dt(inc.get("opened_at", ""))
+            dt_r = _parse_dt(inc.get("resolved_at", ""))
+            if dt_o and dt_r:
+                total_downtime_hours += (dt_r - dt_o).total_seconds() / 3600
 
         return json.dumps({
             "service": service,
@@ -847,12 +827,10 @@ class CrossReferenceTool(BaseTool):
         cmdb = _load_csv(CMDB_CSV)
         changes = _load_csv(CHANGES_CSV)
 
-        # Find matching incidents
         matched_incidents = [i for i in incidents if service.lower() in i.get("service", "").lower()]
         if error_code:
             matched_incidents = [i for i in matched_incidents if i.get("error_code", "") == error_code]
 
-        # Find CI
         ci_info = None
         ci_id = None
         for ci in cmdb:
@@ -861,16 +839,13 @@ class CrossReferenceTool(BaseTool):
                 ci_id = ci.get("ci_id", "")
                 break
 
-        # Find related changes
         related_changes = [c for c in changes if c.get("ci_id", "") == ci_id] if ci_id else []
 
-        # Find explicitly linked changes from incidents
         linked_change_ids = set()
         for inc in matched_incidents:
             rc = inc.get("related_change", "").strip()
             if rc:
                 linked_change_ids.add(rc)
-
         linked_changes = [c for c in changes if c.get("change_id", "") in linked_change_ids]
 
         return json.dumps({
@@ -886,6 +861,167 @@ class CrossReferenceTool(BaseTool):
             "cmdb_record": ci_info,
             "changes_for_ci": related_changes,
             "explicitly_linked_changes": linked_changes,
+        }, indent=2)
+
+
+# ========================== Tool 15: analyze_all_patterns ==========================
+# READS FROM ALL THREE CSV FILES — comprehensive pre-digested analysis
+
+class AnalyzeAllPatternsTool(BaseTool):
+    name: str = "analyze_all_patterns"
+    description: str = (
+        "COMPREHENSIVE PATTERN ANALYSIS — call this FIRST. Reads all three CSV files "
+        "(incidents, CMDB, changes) and performs deep analysis to identify the top "
+        "recurring problem patterns. Returns a pre-digested summary for each pattern "
+        "including: incident cluster, temporal signals, CMDB context, correlated changes, "
+        "resolution note analysis, and root cause hints. This single tool call replaces "
+        "the need for multiple separate parse/find/time calls."
+    )
+    args_schema: type[BaseModel] = AnalyzeAllPatternsInput
+
+    def _run(self) -> str:
+        incidents = _load_csv(INCIDENTS_CSV)
+        cmdb = _load_csv(CMDB_CSV)
+        changes = _load_csv(CHANGES_CSV)
+
+        ci_lookup = {ci["ci_id"]: ci for ci in cmdb}
+        chg_lookup = {c["change_id"]: c for c in changes}
+
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+        # ---- Cluster by (service, error_code) ----
+        error_clusters = defaultdict(list)
+        for inc in incidents:
+            err = inc.get("error_code", "").strip()
+            svc = inc.get("service", "").strip()
+            if err and svc:
+                error_clusters[(svc, err)].append(inc)
+
+        # ---- Build pattern reports for significant clusters ----
+        pattern_reports = []
+        pat_num = 0
+
+        for (svc, err), incs in sorted(error_clusters.items(), key=lambda x: len(x[1]), reverse=True):
+            if len(incs) < 3:
+                continue
+
+            pat_num += 1
+            ids = [i["incident_id"] for i in incs]
+            priorities = Counter(i.get("priority", "") for i in incs)
+            descriptions = list(set(i.get("short_description", "") for i in incs))
+            resolutions = list(set(i.get("resolution_notes", "") for i in incs if i.get("resolution_notes", "").strip()))
+
+            # Temporal analysis
+            day_counts = Counter()
+            hour_counts = Counter()
+            dom_counts = Counter()
+            for inc in incs:
+                dt = _parse_dt(inc.get("opened_at", ""))
+                if dt:
+                    day_counts[day_names[dt.weekday()]] += 1
+                    hour_counts[dt.hour] += 1
+                    dom_counts[dt.day] += 1
+
+            temporal_signals = []
+            if day_counts:
+                top_day, top_count = day_counts.most_common(1)[0]
+                if top_count >= max(2, len(incs) * 0.3):
+                    temporal_signals.append(f"CLUSTERS ON {top_day.upper()} ({top_count}/{len(incs)} incidents)")
+            if hour_counts:
+                peak_hours = [h for h, c in hour_counts.items() if c >= max(2, len(incs) * 0.25)]
+                if peak_hours:
+                    temporal_signals.append(f"Peak hours: {', '.join(f'{h:02d}:00' for h in sorted(peak_hours))}")
+            month_start = sum(dom_counts.get(d, 0) for d in [1, 2, 3])
+            if month_start >= max(2, len(incs) * 0.3):
+                temporal_signals.append(f"CLUSTERS AT MONTH START (days 1-3): {month_start}/{len(incs)} incidents")
+
+            # CMDB lookup
+            ci_id = incs[0].get("ci_id", "")
+            ci_info = ci_lookup.get(ci_id, {})
+
+            # Change correlation
+            linked_chg_ids = set()
+            for inc in incs:
+                rc = inc.get("related_change", "").strip()
+                if rc:
+                    linked_chg_ids.add(rc)
+            linked_changes = [chg_lookup[cid] for cid in linked_chg_ids if cid in chg_lookup]
+            ci_changes = [c for c in changes if c.get("ci_id", "") == ci_id]
+
+            # Resolution note analysis — look for repeated patterns
+            resolution_keywords = Counter()
+            for rn in resolutions:
+                for kw in ["restart", "rollback", "rolled back", "cache", "pool", "batch",
+                           "memory", "connection", "pods", "AZ-", "hotfix", "token", "heap"]:
+                    if kw.lower() in rn.lower():
+                        resolution_keywords[kw] += 1
+
+            # Shared infrastructure detection
+            shared_infra = []
+            if ci_info:
+                for other_ci in cmdb:
+                    if other_ci["ci_id"] == ci_id:
+                        continue
+                    ci_notes = ci_info.get("notes", "")
+                    other_notes = other_ci.get("notes", "")
+                    # Check for shared database references
+                    if "db-ledger-prod" in ci_notes and "db-ledger-prod" in other_notes:
+                        shared_infra.append(f"{other_ci['ci_name']} shares db-ledger-prod connection pool")
+
+            # Downtime calculation
+            total_downtime = 0.0
+            for inc in incs:
+                dt_o = _parse_dt(inc.get("opened_at", ""))
+                dt_r = _parse_dt(inc.get("resolved_at", ""))
+                if dt_o and dt_r:
+                    total_downtime += (dt_r - dt_o).total_seconds() / 3600
+
+            report = {
+                "pattern_id": f"PAT-{pat_num:03d}",
+                "service": svc,
+                "error_code": err,
+                "ci_id": ci_id,
+                "incident_count": len(incs),
+                "incident_ids": ids,
+                "p1_critical_count": priorities.get("P1-Critical", 0),
+                "priority_distribution": dict(priorities),
+                "total_downtime_hours": round(total_downtime, 1),
+                "descriptions": descriptions[:3],
+                "resolution_notes": resolutions[:3],
+                "resolution_keywords": dict(resolution_keywords) if resolution_keywords else {},
+                "temporal_signals": temporal_signals,
+                "day_of_week": dict(day_counts),
+                "hour_distribution": {f"{h:02d}:00": c for h, c in sorted(hour_counts.items())},
+                "day_of_month": dict(sorted(dom_counts.items())),
+                "cmdb": {
+                    "ci_name": ci_info.get("ci_name", ""),
+                    "tier": ci_info.get("tier", ""),
+                    "infra": ci_info.get("infra", ""),
+                    "notes": ci_info.get("notes", ""),
+                    "owner": ci_info.get("owner", ""),
+                } if ci_info else None,
+                "linked_changes": [{
+                    "change_id": c.get("change_id", ""),
+                    "title": c.get("title", ""),
+                    "risk": c.get("risk", ""),
+                    "description": c.get("description", ""),
+                } for c in linked_changes],
+                "all_ci_changes": [{
+                    "change_id": c.get("change_id", ""),
+                    "title": c.get("title", ""),
+                    "risk": c.get("risk", ""),
+                    "implemented_at": c.get("implemented_at", ""),
+                    "description": c.get("description", ""),
+                } for c in ci_changes],
+                "shared_infrastructure": shared_infra,
+            }
+            pattern_reports.append(report)
+
+        return json.dumps({
+            "analysis_summary": f"Analyzed {len(incidents)} incidents across {len(set(i['service'] for i in incidents))} services. Found {len(pattern_reports)} significant patterns (3+ recurring incidents with same service+error_code).",
+            "total_incidents": len(incidents),
+            "total_patterns": len(pattern_reports),
+            "patterns": pattern_reports,
         }, indent=2)
 
 
@@ -905,3 +1041,4 @@ create_known_error = CreateKnownErrorTool()
 create_rfc = CreateRfcTool()
 calculate_impact = CalculateImpactTool()
 cross_reference = CrossReferenceTool()
+analyze_all_patterns = AnalyzeAllPatternsTool()

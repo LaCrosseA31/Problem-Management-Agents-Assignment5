@@ -2,106 +2,96 @@
 
 ## Agent-Driven Analysis Results
 
-```json
-{
-  "rfcs": [
-    {
-      "rfc_id": "RFC-LOAN-001",
-      "title": "Revise Change Control Process for Shared Database Resource Planning",
-      "description": "Implement capacity planning for shared resources to prevent connection pool exhaustion. This includes resource impact analysis, automated CMDB validation checks, and SLA enforcement for shared infrastructure.",
-      "affected_cis": [
-        {
-          "ci_id": "db-ledger-prod",
-          "tier": "Tier-1",
-          "impact": "High"
-        }
-      ],
-      "risk_assessment": {
-        "level": "High",
-        "justification": "Affects Tier-1 shared database (db-ledger-prod) and could disrupt multiple services if not properly validated."
-      },
-      "test_plan": {
-        "pre_change": [
-          "Validate current change control process for shared resource allocation."
-        ],
-        "change_validation": [
-          "Confirm automated capacity validation checks are implemented in CMDB."
-        ],
-        "post_change": [
-          "Monitor shared resource utilization during peak load for 72 hours."
-        ]
-      },
-      "rollback_plan": "Revert to pre-implementation change control process if capacity validation fails during testing.",
-      "implementation_schedule": "During maintenance window (02:00-04:00 UTC), with dependency on CHG0055 completion."
-    },
-    {
-      "rfc_id": "RFC-PAYMENT-001",
-      "title": "Optimize Reporting-Engine Connection Pool Sizing",
-      "description": "Resize shared db-ledger-prod connection pool to 300 connections to accommodate increased parallelism from reporting-engine optimizations.",
-      "affected_cis": [
-        {
-          "ci_id": "db-ledger-prod",
-          "tier": "Tier-1",
-          "impact": "High"
-        },
-        {
-          "ci_id": "reporting-engine",
-          "tier": "Tier-2",
-          "impact": "Medium"
-        }
-      ],
-      "risk_assessment": {
-        "level": "High",
-        "justification": "Direct modification of Tier-1 shared database requires CAB approval to prevent cascading failures."
-      },
-      "test_plan": {
-        "pre_change": [
-          "Validate current connection pool size and workload patterns."
-        ],
-        "change_validation": [
-          "Confirm connection pool resize is correctly applied via `psql` commands."
-        ],
-        "post_change": [
-          "Monitor error rates and connection utilization for 15 minutes post-implementation."
-        ]
-      },
-      "rollback_plan": "Revert connection pool size to 200 connections if errors persist.",
-      "implementation_schedule": "During maintenance window (02:00-04:00 UTC), with dependency on CHG0048 completion."
-    },
-    {
-      "rfc_id": "RFC-ACCOUNT-001",
-      "title": "Adjust DB Query Optimization for Shared Resource Contention",
-      "description": "Modify db-ledger-prod query optimization to reduce contention during peak hours, ensuring fair resource allocation across services.",
-      "affected_cis": [
-        {
-          "ci_id": "db-ledger-prod",
-          "tier": "Tier-1",
-          "impact": "High"
-        },
-        {
-          "ci_id": "mobile-api",
-          "tier": "Tier-2",
-          "impact": "Medium"
-        }
-      ],
-      "risk_assessment": {
-        "level": "Medium",
-        "justification": "Affects Tier-1 shared database but with limited scope to specific query patterns."
-      },
-      "test_plan": {
-        "pre_change": [
-          "Analyze query patterns and identify contention points."
-        ],
-        "change_validation": [
-          "Verify query optimization settings are adjusted in CMDB."
-        ],
-        "post_change": [
-          "Monitor transaction latency and resource utilization during peak hours."
-        ]
-      },
-      "rollback_plan": "Revert query optimization settings to previous state if performance degradation occurs.",
-      "implementation_schedule": "During maintenance window (02:00-04:00 UTC), with dependency on CHG0047 completion."
-    }
-  ]
-}
-```
+# RFC 1: Loan-Approval Engine ERR-5012  
+**Status**: Proposed Standard  
+**Abstract**: This document defines a permanent fix for the recurring error ERR-5012 in the Loan-Approval Engine, caused by DB-Cluster-3 under-provisioning due to undocumented batch jobs.  
+
+**Problem**:  
+The Loan-Approval Engine intermittently fails with ERR-5012 during peak loan validation hours (10:00 UTC Wednesday). This occurs because DB-Cluster-3, which hosts two other services, lacks auto-scaling rules for the undocumented Wednesday batch job.  
+
+**Root Cause**:  
+CHG-2001 (a database resource adjustment) removed auto-scaling for the Wednesday loan validation workload. The CMDB note "batch reconciliation runs Tue 22:00 UTC" was misinterpreted as the only critical batch job, leading to under-provisioning.  
+
+**Workaround**:  
+Temporarily increase DB-Cluster-3 resources during peak hours (10:00 UTC Wednesday) and document all batch schedules in CMDB.  
+
+**Permanent Fix**:  
+Implement auto-scaling for DB-Cluster-3 based on workload patterns. Ensure all critical batch jobs are documented in CMDB with associated resource requirements.  
+
+**Evidence**:  
+- CHG-2001 (database resource adjustment)  
+- CMDB note: "batch reconciliation runs Tue 22:00 UTC"  
+- `query_cmdb(CI-1001)` (undocumented batch job)  
+
+---
+
+# RFC 2: Account-Access Service ERR-7045  
+**Status**: Proposed Standard  
+**Abstract**: This document addresses ERR-7045 in the Account-Access Service, caused by LB-02 misconfiguration during payroll traffic spikes.  
+
+**Problem**:  
+The Account-Access Service fails with ERR-7045 on the 15th of each month during payroll cycles. This occurs because LB-02 lacks dynamic weight distribution for traffic spikes.  
+
+**Root Cause**:  
+CHG-2005 (load balancer rule update) removed dynamic weight distribution for the 15th. The CMDB note "payroll cycles peak at 15th" was not linked to LB-02 policies, amplifying the impact on three hosted services.  
+
+**Workaround**:  
+Re-enable dynamic weight distribution on LB-02 for the 15th and manually adjust load balancer settings during payroll cycles.  
+
+**Permanent Fix**:  
+Update LB-02 to include dynamic weight distribution for traffic spikes. Link CMDB notes about payroll cycles to LB-02 policies.  
+
+**Evidence**:  
+- CHG-2005 (load balancer rule update)  
+- CMDB note: "payroll cycles peak at 15th"  
+- `query_cmdb(CI-1003)` (undocumented policy link)  
+
+---
+
+# RFC 3: Transaction-Processing ERR-9028  
+**Status**: Proposed Standard  
+**Abstract**: This document resolves ERR-9028 in the Transaction-Processing system, caused by certificate chain validation failures in Legacy-Auth-01.  
+
+**Problem**:  
+The Transaction-Processing system fails with ERR-9028 during certificate renewals due to expired root certificates in Legacy-Auth-01.  
+
+**Root Cause**:  
+CHG-2009 (certificate rotation) used expired root certificates from the internal CA. The risk assessment for CHG-2009 lacked certificate chain validation criteria, leading to critical failures.  
+
+**Workaround**:  
+Validate certificate chain validity for Legacy-Auth-01 and temporarily re-enable expired root certificates.  
+
+**Permanent Fix**:  
+Implement automated certificate chain validation during rotations. Ensure all certificates use valid root certificates from the internal CA.  
+
+**Evidence**:  
+- CHG-2009 (certificate rotation)  
+- CMDB note: "certificate renewal failures"  
+- `query_cmdb(CI-1003)` (unvalidated certificate chain)  
+
+---
+
+# RFC 4: Customer Portal ERR-3011  
+**Status**: Proposed Standard  
+**Abstract**: This document corrects ERR-3011 in the Customer Portal, caused by CDN-East misconfiguration during regional outages.  
+
+**Problem**:  
+The Customer Portal fails with ERR-3011 during regional outages due to CDN-East cache purging policies being disabled.  
+
+**Root Cause**:  
+CHG-2013 (CDN policy update) disabled cache purging during outages. The CMDB note "static asset caching during outages" was not synchronized with CDN-East policies, affecting four hosted services.  
+
+**Workaround**:  
+Re-enable cache purging policies on CDN-East during outages and manually purge caches for impacted services.  
+
+**Permanent Fix**:  
+Synchronize CDN-East policies with regional outage response plans. Document cache purging rules in CMDB and test during outage simulations.  
+
+**Evidence**:  
+- CHG-2013 (CDN policy update)  
+- CMDB note: "static asset caching during outages"  
+- `query_cmdb(CI-1004)` (unsynchronized outage plan)  
+
+--- 
+
+Each RFC provides a structured solution to the documented root causes, ensuring long-term system reliability.
